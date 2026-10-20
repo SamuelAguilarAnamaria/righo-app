@@ -124,7 +124,11 @@ def _validar_titulo(p: dict, nivel: int) -> list[dict]:
 
     # --- Sangría ---
     sangria_cm = p.get("sangria_primera_linea_cm")
-    tiene_sangria = sangria_cm is not None and sangria_cm >= UMBRAL_SANGRIA_CM
+    try:
+        tiene_sangria = sangria_cm is not None and float(sangria_cm) >= UMBRAL_SANGRIA_CM
+    except (ValueError, TypeError):
+        tiene_sangria = False
+
     if regla["sangria"] and not tiene_sangria:
         hallazgos.append({
             "tipo": "titulo_sangria",

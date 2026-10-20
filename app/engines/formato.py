@@ -26,13 +26,31 @@ COMBINACIONES_FUENTE_ACEPTADAS = [
 TOLERANCIA_CM = 0.05  # margen de error por redondeos de Word/python-docx
 
 
+def safe_int(val, default=0):
+    """Convierte de forma segura cualquier valor (incluyendo cadenas flotantes) a entero."""
+    try:
+        return int(float(val))
+    except (ValueError, TypeError):
+        return default
+
+
+def safe_float(val, default=0.0):
+    """Convierte de forma segura cualquier valor a float."""
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
 
 def es_referencia(parrafo):
     # Firma de sangría francesa: primera línea negativa
-    return (
-        parrafo["sangria_primera_linea_cm"] is not None
-        and parrafo["sangria_primera_linea_cm"] < 0
-    )
+    primera = parrafo.get("sangria_primera_linea_cm")
+    if primera is None:
+        return False
+    try:
+        return safe_float(primera) < 0
+    except (ValueError, TypeError):
+        return False
 
 
 def es_titulo_o_subtitulo(parrafo):
@@ -64,7 +82,13 @@ def es_titulo_o_subtitulo(parrafo):
 def revisar_margenes(margenes):
     hallazgos = []
     for lado, valor in margenes.items():
-        if abs(valor - REGLAS["margen_cm"]) > TOLERANCIA_CM:
+        if valor is None:
+            continue
+        try:
+            val_num = safe_float(valor)
+        except Exception:
+            continue
+        if abs(val_num - REGLAS["margen_cm"]) > TOLERANCIA_CM:
             hallazgos.append({
                 "tipo": "margenes",
                 "mensaje": f"Margen {lado} de {valor}cm, se espera {REGLAS['margen_cm']}cm",
@@ -77,8 +101,9 @@ def revisar_margenes(margenes):
 def revisar_fuente(parrafo):
     hallazgos = []
     texto_corto = parrafo["texto"][:60]
-    fuente = parrafo["fuente"]
-    tamano = parrafo["tamano_fuente_pt"]
+    fuente = parrafo.get("fuente")
+    tamano_raw = parrafo.get("tamano_fuente_pt")
+    tamano = safe_float(tamano_raw, default=None) if tamano_raw is not None else None
 
     if fuente is None and tamano is None:
         return []
@@ -87,7 +112,7 @@ def revisar_fuente(parrafo):
     combinacion_valida = False
     for fuente_ok, tamano_ok in COMBINACIONES_FUENTE_ACEPTADAS:
         fuente_coincide = (fuente is None) or (fuente == fuente_ok)
-        tamano_coincide = (tamano is None) or (tamano == tamano_ok)
+        tamano_coincide = (tamano is None) or (abs(tamano - tamano_ok) < 0.1)
         if fuente_coincide and tamano_coincide:
             combinacion_valida = True
             break
@@ -120,14 +145,30 @@ def revisar_fuente(parrafo):
 
 
 def revisar_interlineado(parrafo):
-    if parrafo["interlineado"] is None:
+    inter = parrafo.get("interlineado")
+    if inter is None:
         return []
 
-    if parrafo["interlineado"] != REGLAS["interlineado"]:
+    es_valido = False
+    try:
+        if isinstance(inter, (int, float)):
+            es_valido = abs(safe_float(inter) - REGLAS["interlineado"]) < 0.05
+        elif isinstance(inter, str):
+            inter_limpio = inter.replace("pt", "").strip()
+            val_num = safe_float(inter_limpio)
+            if "pt" in inter:
+                tamano_fuente = safe_float(parrafo.get("tamano_fuente_pt"), 12.0)
+                es_valido = abs(val_num - (tamano_fuente * REGLAS["interlineado"])) < 1.0
+            else:
+                es_valido = abs(val_num - REGLAS["interlineado"]) < 0.05
+    except (ValueError, TypeError):
+        es_valido = (inter == REGLAS["interlineado"])
+
+    if not es_valido:
         return [{
             "tipo": "interlineado",
-            "mensaje": f"Interlineado {parrafo['interlineado']}, se espera {REGLAS['interlineado']}",
-            "valor_encontrado": parrafo["interlineado"],
+            "mensaje": f"Interlineado {inter}, se espera {REGLAS['interlineado']}",
+            "valor_encontrado": inter,
             "valor_esperado": REGLAS["interlineado"],
             "parrafo": parrafo["texto"][:60],
         }]
@@ -151,9 +192,12 @@ def revisar_alineacion_y_sangria(parrafo):
         })
 
     if es_referencia(parrafo):
-        primera = parrafo["sangria_primera_linea_cm"]
-        izquierda = parrafo["sangria_izquierda_cm"]
-        if primera is None or abs(primera - REGLAS["sangria_primera_linea_referencia"]) > TOLERANCIA_CM:
+        primera = parrafo.get("sangria_primera_linea_cm")
+        izquierda = parrafo.get("sangria_izquierda_cm")
+        primera_val = safe_float(primera, default=None) if primera is not None else None
+        izquierda_val = safe_float(izquierda, default=None) if izquierda is not None else None
+
+        if primera_val is None or abs(primera_val - REGLAS["sangria_primera_linea_referencia"]) > TOLERANCIA_CM:
             hallazgos.append({
                 "tipo": "sangria",
                 "mensaje": f"Sangría francesa (primera línea) de {primera}cm, se espera {REGLAS['sangria_primera_linea_referencia']}cm",
@@ -161,7 +205,7 @@ def revisar_alineacion_y_sangria(parrafo):
                 "valor_esperado": REGLAS["sangria_primera_linea_referencia"],
                 "parrafo": texto_corto,
             })
-        if izquierda is None or abs(izquierda - REGLAS["sangria_izquierda_referencia"]) > TOLERANCIA_CM:
+        if izquierda_val is None or abs(izquierda_val - REGLAS["sangria_izquierda_referencia"]) > TOLERANCIA_CM:
             hallazgos.append({
                 "tipo": "sangria",
                 "mensaje": f"Sangría francesa (izquierda) de {izquierda}cm, se espera {REGLAS['sangria_izquierda_referencia']}cm",
@@ -170,8 +214,9 @@ def revisar_alineacion_y_sangria(parrafo):
                 "parrafo": texto_corto,
             })
     else:
-        primera = parrafo["sangria_primera_linea_cm"]
-        if primera is None or abs(primera - REGLAS["sangria_primera_linea_cuerpo"]) > TOLERANCIA_CM:
+        primera = parrafo.get("sangria_primera_linea_cm")
+        primera_val = safe_float(primera, default=None) if primera is not None else None
+        if primera_val is None or abs(primera_val - REGLAS["sangria_primera_linea_cuerpo"]) > TOLERANCIA_CM:
             hallazgos.append({
                 "tipo": "sangria",
                 "mensaje": f"Sangría de primera línea {primera}cm, se espera {REGLAS['sangria_primera_linea_cuerpo']}cm",

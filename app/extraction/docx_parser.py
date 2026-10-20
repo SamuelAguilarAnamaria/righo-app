@@ -2,6 +2,56 @@ import re
 
 import docx
 from docx.oxml.ns import qn
+import docx.oxml.simpletypes as _docx_st
+
+# Parche de compatibilidad para python-docx: maneja atributos XML numéricos con formato flotante (ej: '164.00000000000006')
+_orig_hps_convert = _docx_st.ST_HpsMeasure.convert_from_xml
+def _safe_hps_convert_from_xml(str_value: str):
+    if "m" in str_value or "n" in str_value or "p" in str_value:
+        return _docx_st.ST_UniversalMeasure.convert_from_xml(str_value)
+    try:
+        return _docx_st.Pt(int(float(str_value)) / 2.0)
+    except (ValueError, TypeError):
+        return _orig_hps_convert(str_value)
+
+_docx_st.ST_HpsMeasure.convert_from_xml = _safe_hps_convert_from_xml
+
+_orig_twips_convert = _docx_st.ST_TwipsMeasure.convert_from_xml
+def _safe_twips_convert_from_xml(str_value: str):
+    if "i" in str_value or "m" in str_value or "p" in str_value:
+        return _docx_st.ST_UniversalMeasure.convert_from_xml(str_value)
+    try:
+        return _docx_st.Twips(int(round(float(str_value))))
+    except (ValueError, TypeError):
+        return _orig_twips_convert(str_value)
+
+_docx_st.ST_TwipsMeasure.convert_from_xml = _safe_twips_convert_from_xml
+
+_orig_base_int_convert = _docx_st.BaseIntType.convert_from_xml
+def _safe_base_int_convert_from_xml(str_value: str) -> int:
+    try:
+        return int(float(str_value))
+    except (ValueError, TypeError):
+        return _orig_base_int_convert(str_value)
+
+_docx_st.BaseIntType.convert_from_xml = _safe_base_int_convert_from_xml
+
+
+def safe_int(val, default=0):
+    """Convierte de forma segura cualquier valor (incluyendo cadenas flotantes) a entero."""
+    try:
+        return int(float(val))
+    except (ValueError, TypeError):
+        return default
+
+
+def safe_float(val, default=0.0):
+    """Convierte de forma segura cualquier valor a float."""
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
 
 # Patrones estrictos para etiquetas canónicas APA 7 de tablas y figuras
 PATRON_ETIQUETA_TABLA  = re.compile(r'^Tabla\s+\d+', re.IGNORECASE)
@@ -15,61 +65,85 @@ def es_etiqueta_elemento_visual(texto: str) -> bool:
 
 
 def extraer_margenes(documento):
-    seccion = documento.sections[0]
-    return {
-        "superior": round(seccion.top_margin.cm, 2),
-        "inferior": round(seccion.bottom_margin.cm, 2),
-        "izquierdo": round(seccion.left_margin.cm, 2),
-        "derecho": round(seccion.right_margin.cm, 2),
-    }
+    try:
+        seccion = documento.sections[0]
+        return {
+            "superior": round(safe_float(seccion.top_margin.cm), 2) if seccion.top_margin is not None else None,
+            "inferior": round(safe_float(seccion.bottom_margin.cm), 2) if seccion.bottom_margin is not None else None,
+            "izquierdo": round(safe_float(seccion.left_margin.cm), 2) if seccion.left_margin is not None else None,
+            "derecho": round(safe_float(seccion.right_margin.cm), 2) if seccion.right_margin is not None else None,
+        }
+    except Exception:
+        return {"superior": None, "inferior": None, "izquierdo": None, "derecho": None}
 
 
 def resolver_desde_estilo(parrafo, atributo):
-    valor = getattr(parrafo.paragraph_format, atributo)
-    if valor is not None:
-        return valor
+    try:
+        valor = getattr(parrafo.paragraph_format, atributo)
+        if valor is not None:
+            return valor
+    except Exception:
+        pass
 
     estilo = parrafo.style
     while estilo is not None:
-        valor = getattr(estilo.paragraph_format, atributo, None)
-        if valor is not None:
-            return valor
+        try:
+            valor = getattr(estilo.paragraph_format, atributo, None)
+            if valor is not None:
+                return valor
+        except Exception:
+            pass
         estilo = estilo.base_style
 
     return None
 
 
 def obtener_interlineado(parrafo):
-    valor = resolver_desde_estilo(parrafo, "line_spacing")
+    try:
+        valor = resolver_desde_estilo(parrafo, "line_spacing")
+    except Exception:
+        return None
     if valor is None:
         return None
     if hasattr(valor, "pt"):
-        return f"{valor.pt}pt"
+        try:
+            return f"{safe_float(valor.pt)}pt"
+        except Exception:
+            return f"{valor.pt}pt"
     return valor
 
 
 def obtener_tamano_fuente_default(documento):
-    doc_defaults = documento.styles.element.find(qn('w:docDefaults'))
-    if doc_defaults is None:
-        return None
+    try:
+        doc_defaults = documento.styles.element.find(qn('w:docDefaults'))
+        if doc_defaults is None:
+            return None
 
-    rpr_default = doc_defaults.find(qn('w:rPrDefault'))
-    if rpr_default is None:
-        return None
+        rpr_default = doc_defaults.find(qn('w:rPrDefault'))
+        if rpr_default is None:
+            return None
 
-    rpr = rpr_default.find(qn('w:rPr'))
-    if rpr is None:
-        return None
+        rpr = rpr_default.find(qn('w:rPr'))
+        if rpr is None:
+            return None
 
-    sz = rpr.find(qn('w:sz'))
-    if sz is None:
-        return None
+        sz = rpr.find(qn('w:sz'))
+        if sz is None:
+            sz = rpr.find(qn('w:szCs'))
+            if sz is None:
+                return None
 
-    val = sz.get(qn('w:val'))
-    if val is None:
-        return None
+        val = sz.get(qn('w:val'))
+        if val is None:
+            return None
 
-    return int(val) / 2
+        val_int = safe_int(val, default=None)
+        if val_int is None:
+            return None
+
+        return val_int / 2
+    except Exception:
+        return None
 
 
 def obtener_fuente(parrafo, tamano_default=None):
@@ -80,16 +154,23 @@ def obtener_fuente(parrafo, tamano_default=None):
         if run.text.strip():
             if run.font.name:
                 nombre = run.font.name
-            if run.font.size:
-                tamano = run.font.size.pt
+            try:
+                if run.font.size:
+                    tamano = safe_float(run.font.size.pt, default=None)
+            except Exception:
+                tamano = None
             break
 
     estilo = parrafo.style
     while estilo is not None and (nombre is None or tamano is None):
         if nombre is None and estilo.font.name:
             nombre = estilo.font.name
-        if tamano is None and estilo.font.size:
-            tamano = estilo.font.size.pt
+        if tamano is None:
+            try:
+                if estilo.font.size:
+                    tamano = safe_float(estilo.font.size.pt, default=None)
+            except Exception:
+                tamano = None
         estilo = estilo.base_style
 
     if tamano is None:
@@ -151,8 +232,16 @@ def extraer_parrafos(documento):
             continue
 
         fuente_nombre, fuente_tamano = obtener_fuente(parrafo, tamano_default)
-        primera_linea = parrafo.paragraph_format.first_line_indent
-        izquierda = parrafo.paragraph_format.left_indent
+        primera_linea = None
+        izquierda = None
+        try:
+            primera_linea = parrafo.paragraph_format.first_line_indent
+        except Exception:
+            pass
+        try:
+            izquierda = parrafo.paragraph_format.left_indent
+        except Exception:
+            pass
         alineacion_valor = resolver_desde_estilo(parrafo, "alignment")
         en_portada = _es_parrafo_portada(parrafo, indice_real, total)
 
@@ -161,8 +250,8 @@ def extraer_parrafos(documento):
             "estilo": parrafo.style.name if parrafo.style else None,  # Nombre del estilo Word (ej. 'Heading 1')
             "alineacion": alineacion_valor.name if alineacion_valor else None,
             "interlineado": obtener_interlineado(parrafo),
-            "sangria_primera_linea_cm": round(primera_linea.cm, 2) if primera_linea is not None else None,
-            "sangria_izquierda_cm": round(izquierda.cm, 2) if izquierda is not None else None,
+            "sangria_primera_linea_cm": round(safe_float(primera_linea.cm), 2) if primera_linea is not None else None,
+            "sangria_izquierda_cm": round(safe_float(izquierda.cm), 2) if izquierda is not None else None,
             "fuente": fuente_nombre,
             "tamano_fuente_pt": fuente_tamano,
             "en_tabla": False,
@@ -184,8 +273,16 @@ def extraer_parrafos(documento):
                         continue
 
                     fuente_nombre, fuente_tamano = obtener_fuente(parrafo, tamano_default)
-                    primera_linea = parrafo.paragraph_format.first_line_indent
-                    izquierda = parrafo.paragraph_format.left_indent
+                    primera_linea = None
+                    izquierda = None
+                    try:
+                        primera_linea = parrafo.paragraph_format.first_line_indent
+                    except Exception:
+                        pass
+                    try:
+                        izquierda = parrafo.paragraph_format.left_indent
+                    except Exception:
+                        pass
                     alineacion_valor = resolver_desde_estilo(parrafo, "alignment")
 
                     parrafos.append({
@@ -193,8 +290,8 @@ def extraer_parrafos(documento):
                         "estilo": parrafo.style.name if parrafo.style else None,
                         "alineacion": alineacion_valor.name if alineacion_valor else None,
                         "interlineado": obtener_interlineado(parrafo),
-                        "sangria_primera_linea_cm": round(primera_linea.cm, 2) if primera_linea is not None else None,
-                        "sangria_izquierda_cm": round(izquierda.cm, 2) if izquierda is not None else None,
+                        "sangria_primera_linea_cm": round(safe_float(primera_linea.cm), 2) if primera_linea is not None else None,
+                        "sangria_izquierda_cm": round(safe_float(izquierda.cm), 2) if izquierda is not None else None,
                         "fuente": fuente_nombre,
                         "tamano_fuente_pt": fuente_tamano,
                         "en_tabla": True,

@@ -110,5 +110,45 @@ citas_totales = procesar_citas(datos_con_tabla)
 assert any(c["autores_raw"] == "Alcóser" for c in citas_totales), "Citation in table was not found!"
 assert any(c["autores_raw"] == "Pérez" for c in citas_totales), "Citation in table note was not found!"
 
+# 10. Test conversiones numéricas seguras (safe_int / safe_float) y valores float en XML
+from app.extraction.docx_parser import safe_int, safe_float
+import docx.oxml.simpletypes as docx_st
+from app.engines.formato import revisar_formato
+
+assert safe_int("164.00000000000006") == 164
+assert safe_int("24") == 24
+assert safe_int(24.8) == 24
+assert safe_int("invalido", default=0) == 0
+assert safe_int(None, default=-1) == -1
+
+assert safe_float("164.00000000000006") == 164.00000000000006
+assert safe_float("12.5") == 12.5
+assert safe_float(None, default=0.0) == 0.0
+
+# Verificar que python-docx maneja strings flotantes sin lanzar ValueError
+pt_res = docx_st.ST_HpsMeasure.convert_from_xml("164.00000000000006")
+assert pt_res is not None
+
+# Test revisión de formato con valores decimales flotantes en cadenas
+datos_float_str = {
+    "margenes": {"superior": "2.54", "inferior": 2.54, "izquierdo": 2.54, "derecho": 2.54},
+    "parrafos": [
+        {
+            "texto": "Texto de prueba con interlineado y fuente segura.",
+            "fuente": "Arial",
+            "tamano_fuente_pt": "12.00000000000001",
+            "interlineado": "2.0000000000000004",
+            "alineacion": "JUSTIFY",
+            "sangria_primera_linea_cm": "1.2700000000000002",
+            "sangria_izquierda_cm": None,
+            "en_tabla": False,
+            "en_portada": False,
+        }
+    ]
+}
+hallazgos_format = revisar_formato(datos_float_str)
+assert len(hallazgos_format) == 0, f"Expected 0 errors with valid float formatted strings, got {hallazgos_format}"
+
 print("TODOS LOS TESTS DE VALIDACIÓN PASARON EXITOSAMENTE (100% OK).")
+
 
