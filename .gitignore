@@ -1,0 +1,22 @@
+# Entorno virtual
+venv/
+.venv/
+env/
+
+# Cache de Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Archivos PDF generados
+*.pdf
+
+# Archivos del sistema operativo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Archivos temporales y de registro
+*.log
+*.tmp
