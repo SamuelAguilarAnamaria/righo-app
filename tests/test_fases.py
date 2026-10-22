@@ -149,6 +149,32 @@ datos_float_str = {
 hallazgos_format = revisar_formato(datos_float_str)
 assert len(hallazgos_format) == 0, f"Expected 0 errors with valid float formatted strings, got {hallazgos_format}"
 
+# 11. Test optimizaciones de memoria en gramática (filtrado de vacíos y chunking > 100 párrafos)
+from app.engines.gramatica import get_language_tool
+
+class MockLanguageTool:
+    def __init__(self):
+        self.checked_texts = []
+    def check(self, text):
+        self.checked_texts.append(text)
+        return []
+
+mock_tool = MockLanguageTool()
+
+# Documento con párrafos vacíos, solo espacios y más de 100 párrafos
+parrafos_test = [{"texto": ""}, {"texto": "   \n\t  "}]
+for i in range(120):
+    parrafos_test.append({"texto": f"Este es el párrafo de prueba número {i} con contenido académico válido para auditoría."})
+
+datos_grandes = {"parrafos": parrafos_test}
+errores_chunk = revisar_gramatica(datos_grandes, tool=mock_tool)
+assert isinstance(errores_chunk, list)
+# Asegurar que se filtraron los 2 párrafos vacíos
+assert len(mock_tool.checked_texts) == 120
+assert "" not in mock_tool.checked_texts
+assert "   \n\t  " not in mock_tool.checked_texts
+
 print("TODOS LOS TESTS DE VALIDACIÓN PASARON EXITOSAMENTE (100% OK).")
+
 
 

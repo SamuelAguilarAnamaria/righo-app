@@ -11,37 +11,43 @@ El servidor LanguageTool se descarga (~200 MB) en el primer uso.
 """
 from __future__ import annotations
 
+import gc
 import re
 
-# Singleton lazy-initialized para evitar múltiples instancias del servidor JVM
+# Singleton lazy-initialized para fallback fuera de Streamlit
 _tool = None
+
+try:
+    import streamlit as st
+    @st.cache_resource
+    def get_language_tool():
+        """Inicializa y cachea el motor de LanguageTool en Streamlit para evitar múltiples procesos Java."""
+        import language_tool_python
+        return language_tool_python.LanguageTool('es')
+except Exception:
+    def get_language_tool():
+        global _tool
+        if _tool is None:
+            import language_tool_python
+            _tool = language_tool_python.LanguageTool('es')
+        return _tool
 
 
 def _get_tool():
-    """Inicializa y retorna el singleton de LanguageTool forzado a español peruano (es-PE)."""
-    global _tool
-    if _tool is None:
-        try:
-            import language_tool_python  # type: ignore
-            # Forzar español para evitar que LanguageTool use diccionarios en inglés/alemán
-            # y marque palabras en español como errores (ej. ESCUELA → RESCUE).
-            try:
-                _tool = language_tool_python.LanguageTool('es-PE')
-            except Exception:
-                # Fallback a español genérico si es-PE no está disponible
-                _tool = language_tool_python.LanguageTool('es')
-        except ImportError:
-            raise ImportError(
-                "El paquete 'language-tool-python' no está instalado.\n"
-                "Instálalo con: pip install language-tool-python\n"
-                "También necesitas Java 8+ en tu sistema."
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                f"No se pudo inicializar LanguageTool: {exc}\n"
-                "Verifica que Java 8+ esté instalado y accesible en el PATH."
-            ) from exc
-    return _tool
+    """Inicializa y retorna LanguageTool usando la función cacheada get_language_tool()."""
+    try:
+        return get_language_tool()
+    except ImportError:
+        raise ImportError(
+            "El paquete 'language-tool-python' no está instalado.\n"
+            "Instálalo con: pip install language-tool-python\n"
+            "También necesitas Java 8+ en tu sistema."
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"No se pudo inicializar LanguageTool: {exc}\n"
+            "Verifica que Java 8+ esté instalado y accesible en el PATH."
+        ) from exc
 
 
 
@@ -97,77 +103,104 @@ def _es_parrafo_omitible(texto: str) -> bool:
 
 def revisar_gramatica(
     datos_extraidos: dict,
-    max_parrafos: int = 50,
+    max_parrafos: int | None = None,
+    tool=None,
 ) -> list[dict]:
     """
     Analiza ortografía y gramática del cuerpo del documento.
-
-    Args:
-        datos_extraidos: Dict retornado por docx_parser.extraer_docx().
-        max_parrafos:    Número máximo de párrafos a analizar (para controlar tiempo).
-
-    Returns:
-        Lista de dicts con los errores encontrados. Cada dict contiene:
-        - parrafo_extracto: primeros 80 caracteres del párrafo
-        - offset:          posición del error en el texto
-        - mensaje:         descripción del error (en español)
-        - sugerencias:     lista de correcciones sugeridas (máx. 3)
-        - regla_id:        ID de la regla LanguageTool que disparó el error
-        - categoria:       categoría del error (TYPOS, GRAMMAR, STYLE, etc.)
+    Optimizado para bajo consumo de memoria:
+    - Filtra párrafos vacíos o solo con espacios.
+    - Si el documento tiene más de 100 párrafos, procesa en lotes (chunks) de máximo 25 párrafos a la vez.
+    - Libera memoria con gc.collect() entre lotes.
     """
-    tool = _get_tool()
-    errores_encontrados: list[dict] = []
-    parrafos_analizados = 0
+    if tool is None:
+        tool = _get_tool()
+
+    todos_parrafos = datos_extraidos.get("parrafos", [])
+    total_doc_parrafos = len(todos_parrafos)
+
+    # 1. Filtrar párrafos vacíos o solo con espacios, omitibles y en sección de referencias
+    parrafos_candidatos: list[str] = []
     en_referencias = False
 
-    for p in datos_extraidos.get("parrafos", []):
-        texto = p.get("texto", "").strip() if isinstance(p, dict) else str(p).strip()
+    for p in todos_parrafos:
+        texto = p.get("texto", "") if isinstance(p, dict) else str(p)
+        texto_limpio = texto.strip()
+
+        # Filtrar párrafos vacíos o solo con espacios
+        if not texto_limpio:
+            continue
 
         # Detener análisis al llegar a la sección de referencias
         if re.match(
             r'^\s*(REFERENCIAS|REFERENCIAS BIBLIOGRÁFICAS|BIBLIOGRAFÍA|REFERENCES|WORKS CITED)\s*$',
-            texto, re.IGNORECASE
+            texto_limpio, re.IGNORECASE
         ):
             en_referencias = True
 
         if en_referencias:
             continue
 
-        if _es_parrafo_omitible(texto):
+        if _es_parrafo_omitible(texto_limpio):
             continue
 
-        try:
-            matches = tool.check(texto)
-        except Exception:
-            continue  # Ignorar errores del servidor en un párrafo específico
+        parrafos_candidatos.append(texto_limpio)
 
-        for match in matches:
-            # Filtrar reglas excluidas
-            rule_id = getattr(match, "rule_id", getattr(match, "ruleId", ""))
-            if rule_id in REGLAS_EXCLUIDAS:
-                continue
+    # 2. Si el documento tiene más de 100 párrafos, procesar en lotes (chunks) de máximo 25 párrafos
+    if total_doc_parrafos > 100 or len(parrafos_candidatos) > 100:
+        tamano_lote = 25
+    else:
+        tamano_lote = len(parrafos_candidatos) if parrafos_candidatos else 1
 
-            error_len = getattr(match, "error_length", getattr(match, "errorLength", 0))
+    chunks = [
+        parrafos_candidatos[i:i + tamano_lote]
+        for i in range(0, len(parrafos_candidatos), tamano_lote)
+    ]
 
-            errores_encontrados.append({
-                "parrafo_extracto": texto[:80] + ("..." if len(texto) > 80 else ""),
-                "offset": match.offset,
-                "fragmento_error": texto[match.offset: match.offset + error_len],
-                "mensaje": match.message,
-                "sugerencias": list(match.replacements[:3]),
-                "regla_id": rule_id,
-                "categoria": str(getattr(match, "category", "UNKNOWN")),
-            })
+    errores_encontrados: list[dict] = []
+    parrafos_analizados = 0
 
-        parrafos_analizados += 1
-        if parrafos_analizados >= max_parrafos:
+    for chunk in chunks:
+        for texto in chunk:
+            try:
+                matches = tool.check(texto)
+            except Exception:
+                continue  # Ignorar errores del servidor en un párrafo específico
+
+            for match in matches:
+                # Filtrar reglas excluidas
+                rule_id = getattr(match, "rule_id", getattr(match, "ruleId", ""))
+                if rule_id in REGLAS_EXCLUIDAS:
+                    continue
+
+                error_len = getattr(match, "error_length", getattr(match, "errorLength", 0))
+
+                errores_encontrados.append({
+                    "parrafo_extracto": texto[:80] + ("..." if len(texto) > 80 else ""),
+                    "offset": match.offset,
+                    "fragmento_error": texto[match.offset: match.offset + error_len],
+                    "mensaje": match.message,
+                    "sugerencias": list(match.replacements[:3]),
+                    "regla_id": rule_id,
+                    "categoria": str(getattr(match, "category", "UNKNOWN")),
+                })
+
+            parrafos_analizados += 1
+            if max_parrafos is not None and parrafos_analizados >= max_parrafos:
+                break
+
+        # Liberación forzada de memoria intermedia tras procesar cada lote
+        if total_doc_parrafos > 100 or len(parrafos_candidatos) > 100:
+            gc.collect()
+
+        if max_parrafos is not None and parrafos_analizados >= max_parrafos:
             break
 
     return errores_encontrados
 
 
 def cerrar_tool():
-    """Cierra el servidor LanguageTool (libera el proceso Java)."""
+    """Cierra el servidor LanguageTool (libera el proceso Java si no está en cache_resource)."""
     global _tool
     if _tool is not None:
         try:

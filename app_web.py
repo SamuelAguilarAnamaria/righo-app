@@ -6,6 +6,7 @@ Auditoría y Diagnóstico Académico APA 7.ª Edición con Streamlit.
 import os
 import sys
 import tempfile
+import gc
 import streamlit as st
 
 # Asegurar ruta raíz en sys.path
@@ -19,6 +20,16 @@ from app.engines.tablas_figuras import revisar_tablas_y_figuras
 from app.engines.titulos import revisar_titulos
 from cli import realizar_validacion_cruzada
 from reporte_pdf import generar_reporte_pdf, _clasificar_riesgo, _semaforo_datos
+
+
+@st.cache_resource
+def get_language_tool():
+    """
+    Inicializa y cachea el motor de LanguageTool en Streamlit para evitar
+    levantar múltiples procesos Java en RAM.
+    """
+    import language_tool_python
+    return language_tool_python.LanguageTool('es')
 
 
 # -----------------------------------------------------------------------------
@@ -271,6 +282,58 @@ st.markdown("""
         background-color: #0F2537 !important;
         color: #FFFFFF !important;
     }
+
+    /* ================================================================
+     * FASE 3: CORRECCIÓN DE CONTRASTE — MÓDULO AMARILLO
+     * Fuerza texto oscuro en cualquier badge, alerta o contenedor
+     * con fondo amarillo (#FFC107, #FFF3CD, #FFEB3B, #FFFBEB, etc.)
+     * ================================================================ */
+
+    /* Alertas Streamlit tipo st.warning (fondo amarillo-ámbar) */
+    div[data-testid="stAlert"][data-baseweb="notification"] {
+        color: #0F172A !important;
+    }
+    /* Selector genérico para contenedores con fondo amarillo */
+    [style*="background-color: #FFC107"],
+    [style*="background-color: #FFF3CD"],
+    [style*="background-color: #FFEB3B"],
+    [style*="background-color: #FFFBEB"],
+    [style*="background-color: #FEF3C7"],
+    [style*="background-color: #F6AD55"],
+    [style*="background: #FFC107"],
+    [style*="background: #FFF3CD"],
+    [style*="background: #FFEB3B"],
+    [style*="background: #FFFBEB"] {
+        color: #0F172A !important;
+    }
+    [style*="background-color: #FFC107"] *,
+    [style*="background-color: #FFF3CD"] *,
+    [style*="background-color: #FFEB3B"] *,
+    [style*="background-color: #FFFBEB"] *,
+    [style*="background-color: #FEF3C7"] *,
+    [style*="background: #FFC107"] *,
+    [style*="background: #FFF3CD"] * {
+        color: #0F172A !important;
+    }
+    /* Badges y chips custom con fondo amarillo */
+    .righo-badge-amber,
+    .badge-yellow,
+    .alert-amber {
+        color: #0F172A !important;
+        background-color: #FEF3C7 !important;
+        border-color: #F59E0B !important;
+    }
+    /* Corrección específica de st.warning() en Streamlit */
+    .stAlert.st-ae,
+    div.stAlert > div {
+        color: #0F172A !important;
+    }
+    div.stAlert > div p,
+    div.stAlert > div span,
+    div.stAlert > div b,
+    div.stAlert > div strong {
+        color: #0F172A !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -373,9 +436,9 @@ def ejecutar_pipeline_auditoria(
     # 4. Gramática y Sintaxis
     if analizar_gramatica:
         try:
-            from app.engines.gramatica import revisar_gramatica, cerrar_tool
-            reporte_gramatica = revisar_gramatica(datos_doc)
-            cerrar_tool()
+            from app.engines.gramatica import revisar_gramatica
+            tool = get_language_tool()
+            reporte_gramatica = revisar_gramatica(datos_doc, tool=tool)
         except (ImportError, RuntimeError, Exception) as exc:
             reporte_gramatica = [{"error": f"LanguageTool no disponible: {str(exc)}"}]
     else:
@@ -511,7 +574,7 @@ if boton_auditar and archivo_subido is not None:
     tmp_docx_path = None
     tmp_pdf_path = None
 
-    with st.spinner("Analizando normas APA 7, cruce de citas y gramática..."):
+    with st.spinner("⏳ Analizando normas APA 7, cruce de citas y gramática... esto puede tomar unos segundos."):
         try:
             # 1. Guardar archivo cargado en ruta temporal limpia
             with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp_docx:
@@ -545,8 +608,43 @@ if boton_auditar and archivo_subido is not None:
             st.session_state["nombre_archivo"] = archivo_subido.name
             st.toast("¡Auditoría completada exitosamente!", icon="✅")
 
+            # Liberación forzada de memoria RAM inmediatamente tras generar el PDF
+            gc.collect()
+
         except Exception as exc:
-            st.error(f"❌ Ocurrió un inconveniente durante el análisis: {str(exc)}")
+            # Fase 5: Captura elegante de excepciones — mensaje amigable sin código técnico
+            import urllib.parse
+            mensaje_soporte = urllib.parse.quote(
+                f"Hola RigHo, tuve un problema al analizar el documento '{archivo_subido.name}' "
+                "con su plataforma. ¿Me pueden ayudar?"
+            )
+            st.error(
+                "🚨 **Ocurrió un inconveniente al procesar tu documento.**\n\n"
+                "Posibles causas: el archivo puede estar dañado, protegido con contraseña, "
+                "o contener elementos no compatibles.\n\n"
+                "**¿Qué puedes hacer?**\n"
+                "- Guarda el documento como una copia nueva en Word (.docx).\n"
+                "- Elimina contraseñas o protecciones del archivo.\n"
+                "- Contacta a nuestro equipo técnico para asistencia personalizada."
+            )
+            st.markdown(
+                f"""
+                <div style="background: #E6F7FF; border: 1px solid #00A8E8; border-radius: 10px;
+                            padding: 14px 18px; margin-top: 8px;">
+                    <b style="color: #0F2537;">📞 Soporte Técnico RigHo</b><br/>
+                    <a href="https://wa.me/51917313145?text={mensaje_soporte}"
+                       target="_blank"
+                       style="color: #00A8E8; font-weight: 700; text-decoration: none; font-size: 1rem;">
+                        💬 Contactar por WhatsApp: +51 917 313 145
+                    </a>
+                    <br/>
+                    <span style="color: #475569; font-size: 0.82rem;">
+                        Nuestro equipo te asistirá de inmediato.
+                    </span>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
         finally:
             # Manejo limpio y eliminación de archivos temporales
             if tmp_docx_path and os.path.exists(tmp_docx_path):
@@ -559,6 +657,8 @@ if boton_auditar and archivo_subido is not None:
                     os.remove(tmp_pdf_path)
                 except OSError:
                     pass
+            # Liberación forzada de memoria tras limpieza de temporales
+            gc.collect()
 
 
 # -----------------------------------------------------------------------------
@@ -628,10 +728,20 @@ if "reporte_actual" in st.session_state and st.session_state["reporte_actual"]:
             help="Faltas ortográficas o sintácticas detectadas por el motor de gramática."
         )
 
-    # Botón de Descarga del Informe PDF
+    # Botón de Descarga del Informe PDF + CTA WhatsApp dinámico
     st.markdown("<div style='height: 16px;'></div>", unsafe_allow_html=True)
     if "pdf_bytes" in st.session_state and st.session_state["pdf_bytes"]:
-        desc_col1, desc_col2 = st.columns([1.5, 1])
+        import urllib.parse
+        nivel_riesgo_actual = stats.get("nivel_riesgo", "Moderado")
+        nombre_doc_actual = st.session_state.get('nombre_archivo', 'mi documento')
+        msg_wa = urllib.parse.quote(
+            f"Hola RigHo, acabo de auditar '{nombre_doc_actual}' con su plataforma "
+            f"y el nivel de riesgo detectado es: {nivel_riesgo_actual}. "
+            "Me gustaría recibir asesoría personalizada para levantar las observaciones."
+        )
+        url_whatsapp_dinamico = f"https://wa.me/51917313145?text={msg_wa}"
+
+        desc_col1, desc_col2, desc_col3 = st.columns([1.8, 1, 0.9])
         with desc_col1:
             st.download_button(
                 label="📥 Descargar Informe Completo en PDF (reporte_diagnostico_righo.pdf)",
@@ -642,9 +752,28 @@ if "reporte_actual" in st.session_state and st.session_state["reporte_actual"]:
             )
         with desc_col2:
             st.markdown("""
-            <div style="background: #E6F7FF; border: 1px solid #BEE3F8; border-radius: 8px; padding: 10px 14px; font-size: 0.84rem; color: #0C5460;">
-                💡 <b>Tip RigHo:</b> El PDF incluye foliación 'Página X de Y', membrete institucional y detalles listos para remitir a tu asesor.
+            <div style="background: #E6F7FF; border: 1px solid #BEE3F8; border-radius: 8px;
+                        padding: 10px 14px; font-size: 0.84rem; color: #0C5460;">
+                💡 <b style="color: #0F2537;">Tip RigHo:</b> El PDF incluye foliación
+                'Página X de Y', membrete institucional y detalles listos para remitir a tu asesor.
             </div>
+            """, unsafe_allow_html=True)
+        with desc_col3:
+            st.markdown(f"""
+            <a href="{url_whatsapp_dinamico}" target="_blank" style="text-decoration: none;">
+                <div style="background: linear-gradient(135deg, #25D366 0%, #128C7E 100%);
+                            border-radius: 10px; padding: 12px 10px; text-align: center;
+                            box-shadow: 0 4px 14px rgba(37, 211, 102, 0.35);
+                            cursor: pointer; transition: all 0.25s;">
+                    <div style="color: #FFFFFF; font-weight: 800; font-size: 0.88rem;
+                                font-family: 'Outfit', sans-serif;">
+                        💬 Asesoría por WhatsApp
+                    </div>
+                    <div style="color: rgba(255,255,255,0.85); font-size: 0.72rem; margin-top: 3px;">
+                        Riesgo: <b>{nivel_riesgo_actual}</b>
+                    </div>
+                </div>
+            </a>
             """, unsafe_allow_html=True)
 
     # Desglose Rápido en Pestañas (Exploración en Pantalla)
@@ -722,6 +851,9 @@ if "reporte_actual" in st.session_state and st.session_state["reporte_actual"]:
             if len(stats["gram_list"]) > 15:
                 st.caption(f"*Mostrando 15 de {len(stats['gram_list'])} hallazgos gramaticales. Revisa el PDF para el reporte completo.*")
 
+    # Liberación forzada de memoria RAM tras mostrar los resultados en pantalla
+    gc.collect()
+
 else:
     # Estado inicial: Bienvenida y guía de uso
     st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
@@ -759,3 +891,6 @@ else:
             </div>
         </div>
         """, unsafe_allow_html=True)
+
+# Liberación forzada de memoria global
+gc.collect()

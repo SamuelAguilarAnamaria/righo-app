@@ -1,8 +1,23 @@
+"""
+app/engines/citas.py — Motor de detección de citas APA 7 (v2.0 Refactor Master)
+
+Mejoras v2.0:
+- Normalización de texto previa: puntuación excedente, dobles espacios, conectores.
+- Detección robusta de citas parentéticas y narrativas con acentos.
+- Estandarización de conectores 'y', '&', 'et al.' para cruce limpio.
+- Reducción de falsos positivos mediante PALABRAS_NO_AUTOR ampliada.
+- Normalización de raw_key para cruce bidireccional consistente.
+"""
 import json
 import os
 import re
 import sys
+import unicodedata
 
+
+# ---------------------------------------------------------------------------
+# Listas de control semántico
+# ---------------------------------------------------------------------------
 PALABRAS_NO_AUTOR = {
     "según", "de acuerdo con", "conforme a", "afirma", "expresa", "menciona", "para", "con", "en", "por",
     "asimismo", "además", "finalmente", "como", "revelan", "señala", "señalan", "propone",
@@ -17,7 +32,10 @@ PALABRAS_NO_AUTOR = {
     "objetivo", "propósito", "método", "metodología", "diseño", "muestra", "población", "instrumento",
     "perú", "turquía", "méxico", "guatemala", "colombia", "ecuador", "chile", "argentina", "españa",
     "bogotá", "cusco", "lima", "huancayo", "junín", "latinoamérica", "arequipa",
-    "adaptado", "tomado", "fuente", "modificado", "elaborado", "elaboración", "nota"
+    "adaptado", "tomado", "fuente", "modificado", "elaborado", "elaboración", "nota",
+    # Ampliaciones v2.0
+    "bajo", "ante", "hacia", "hasta", "sin", "tras", "durante", "mediante",
+    "tanto", "ambas", "ambos", "dicho", "dicha", "dichos", "dichas",
 }
 
 PARTICULAS_Y_CONECTORES = {
@@ -25,6 +43,51 @@ PARTICULAS_Y_CONECTORES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Normalización previa de texto (v2.0)
+# ---------------------------------------------------------------------------
+def normalizar_texto_previo(texto: str) -> str:
+    """
+    Limpieza previa antes del análisis:
+    - Elimina dobles espacios.
+    - Normaliza conectores 'y', '&' → consistentes con APA.
+    - Preserva acentos (no se eliminar para detección correcta).
+    """
+    if not texto:
+        return ""
+    # Eliminar dobles espacios
+    texto = re.sub(r' {2,}', ' ', texto)
+    # Normalizar tabulaciones a espacios
+    texto = texto.replace('\t', ' ').strip()
+    return texto
+
+
+def normalizar_autor_para_cruce(autor_raw: str) -> str:
+    """
+    Normaliza la cadena de autor para cruce bidireccional limpio:
+    - Elimina tildes/diacríticos.
+    - Convierte a minúsculas.
+    - Estandariza 'et al.' (sin punto → con punto).
+    - Limpia puntuación excedente.
+    """
+    if not autor_raw:
+        return ""
+    # Normalizar NFD y eliminar diacríticos
+    nfd = unicodedata.normalize('NFD', autor_raw)
+    sin_tildes = ''.join(c for c in nfd if unicodedata.category(c) != 'Mn')
+    texto = sin_tildes.lower().strip()
+    # Estandarizar et al
+    texto = re.sub(r'\bet\s+al\.?', 'et al.', texto)
+    # Estandarizar & → y
+    texto = texto.replace('&', 'y')
+    # Eliminar puntuación excedente al inicio/final
+    texto = texto.strip('.,;: ')
+    return texto
+
+
+# ---------------------------------------------------------------------------
+# Detección de errores comunes APA 7
+# ---------------------------------------------------------------------------
 def detectar_errores_comunes(autores_str, tipo_cita, texto_completo=""):
     hallazgos = []
 
@@ -56,6 +119,9 @@ def detectar_errores_comunes(autores_str, tipo_cita, texto_completo=""):
     return hallazgos
 
 
+# ---------------------------------------------------------------------------
+# Extracción de autor narrativo
+# ---------------------------------------------------------------------------
 def extraer_autor_narrativo_desde_texto(texto_previo):
     if not texto_previo:
         return ""
@@ -77,6 +143,8 @@ def extraer_autor_narrativo_desde_texto(texto_previo):
     texto_mod = re.sub(r'\bet\s+al\b', '___ET_AL_NODOT___', texto_mod, flags=re.IGNORECASE)
     texto_mod = re.sub(r'\by\s+col[s]?\.', '___Y_COL_DOT___', texto_mod, flags=re.IGNORECASE)
     texto_mod = re.sub(r'\by\s+col[s]?\b', '___Y_COL_NODOT___', texto_mod, flags=re.IGNORECASE)
+    # v2.0: También capturar "y otros" y "y otras"
+    texto_mod = re.sub(r'\by\s+otros?\b', '___ET_AL_NODOT___', texto_mod, flags=re.IGNORECASE)
 
     tokens = re.findall(
         r'___ET_AL_DOT___|___ET_AL_NODOT___|___Y_COL_DOT___|___Y_COL_NODOT___|[A-Za-zÁÉÍÓÚÑñáéíóúüÜ\-]+|&',
@@ -96,16 +164,16 @@ def extraer_autor_narrativo_desde_texto(texto_previo):
             if "ET_AL_DOT" in token:
                 val = "et al."
             elif "ET_AL_NODOT" in token:
-                val = "et al"
+                val = "et al."  # v2.0: normalizar a con punto
             elif "Y_COL_DOT" in token:
                 val = "y col."
             else:
-                val = "y col"
+                val = "y col."  # v2.0: normalizar a con punto
             tokens_autor.append(val)
             continue
 
         if token_lower in PARTICULAS_Y_CONECTORES:
-            if tiene_autor_capitalizado or any(t in ("et al.", "et al", "y col.", "y col") for t in tokens_autor):
+            if tiene_autor_capitalizado or any(t in ("et al.", "y col.") for t in tokens_autor):
                 tokens_autor.append(token)
                 continue
             else:
@@ -145,7 +213,10 @@ def extraer_autor_narrativo_desde_texto(texto_previo):
     return " ".join(tokens_autor).strip()
 
 
-# Patrón para buscar citas en el texto contemplando caracteres acentuados (ÁÉÍÓÚÑáéíóúñ)
+# ---------------------------------------------------------------------------
+# Patrones de detección de citas
+# ---------------------------------------------------------------------------
+# Patrón para buscar citas en el texto contemplando caracteres acentuados
 # y formatos (Autor, Año), (Autor et al., Año), con páginas o sin fecha
 REGEX_CITAS_TEXTO = re.compile(
     r'\(\s*([A-ZÁÉÍÓÚÑÜa-záéíóúñü\s,\.&-]+?)\s*,\s*(\d{4}[a-z]?|s\.?\s*f\.|n\.?\s*d\.)(?:\s*[,:]\s*(?:p|pp)\.?\s*\d+(?:-\d+)?)?\s*\)'
@@ -160,22 +231,30 @@ REGEX_SUB_CITA = re.compile(
 )
 
 
+# ---------------------------------------------------------------------------
+# Extracción de citas en un párrafo
+# ---------------------------------------------------------------------------
 def extraer_citas_parrafo(parrafo_obj):
     if isinstance(parrafo_obj, dict):
-        texto = parrafo_obj.get("texto", "").strip()
+        texto_raw = parrafo_obj.get("texto", "").strip()
     else:
-        texto = str(parrafo_obj).strip()
+        texto_raw = str(parrafo_obj).strip()
 
-    if not texto:
+    if not texto_raw:
         return []
 
+    # v2.0: Normalización previa del texto
+    texto = normalizar_texto_previo(texto_raw)
+
     citas_encontradas = []
+    # Set de deduplicación para evitar detectar la misma cita como parentética y narrativa
+    citas_vistas = set()  # (autor_normalizado, anio)
 
     # 1. Citas parentéticas (soporta caracteres con tildes, sub-año, s.f. y rangos de página)
     for match_p in REGEX_PARENTESIS.finditer(texto):
         contenido = match_p.group("contenido").strip()
 
-        # Omitir si es solamente año y página sin autor (ej: '(2019, p. 12)' o '(2020)')
+        # Omitir si es solamente año y página sin autor
         if re.match(r'^(?:\d{4}[a-z]?|s\.?\s*f\.|n\.?\s*d\.)(?:\s*[,:]\s*(?:p|pp)\.?\s*\d+(?:-\d+)?)*$', contenido):
             continue
 
@@ -196,14 +275,22 @@ def extraer_citas_parrafo(parrafo_obj):
                 if len(autores) > 100 or autores.startswith("Tabla") or autores.startswith("Figura"):
                     continue
 
+                # v2.0: Normalizar et al. (sin punto → con punto)
+                autores = re.sub(r'\bet\s+al\b(?!\.)', 'et al.', autores, flags=re.IGNORECASE)
+
                 errores = detectar_errores_comunes(autores, "parentetica", sub)
+                autor_key = (normalizar_autor_para_cruce(autores), anio)
+
+                if autor_key not in citas_vistas:
+                    citas_vistas.add(autor_key)
 
                 citas_encontradas.append({
                     "tipo_cita": "parentetica",
                     "autores_raw": autores,
+                    "autor": autores,  # alias para cruce bidireccional
                     "anio": anio,
                     "texto_completo": f"({sub})",
-                    "parrafo": texto,  # Se asigna el texto completo del párrafo
+                    "parrafo": texto,
                     "errores": errores,
                 })
 
@@ -218,21 +305,34 @@ def extraer_citas_parrafo(parrafo_obj):
         autor_extraido = extraer_autor_narrativo_desde_texto(texto_previo)
 
         if autor_extraido and autor_extraido.lower() not in PALABRAS_NO_AUTOR and len(autor_extraido) > 1:
+            # v2.0: Normalizar et al. en autor narrativo
+            autor_extraido = re.sub(r'\bet\s+al\b(?!\.)', 'et al.', autor_extraido, flags=re.IGNORECASE)
+
+            autor_key = (normalizar_autor_para_cruce(autor_extraido), anio)
+            # Evitar duplicar si ya fue capturada como parentética en el mismo párrafo
+            if autor_key in citas_vistas:
+                continue
+            citas_vistas.add(autor_key)
+
             texto_completo = f"{autor_extraido} ({anio})"
             errores = detectar_errores_comunes(autor_extraido, "narrativa", texto_completo)
 
             citas_encontradas.append({
                 "tipo_cita": "narrativa",
                 "autores_raw": autor_extraido,
+                "autor": autor_extraido,  # alias para cruce bidireccional
                 "anio": anio,
                 "texto_completo": texto_completo,
-                "parrafo": texto,  # Se asigna el texto completo del párrafo
+                "parrafo": texto,
                 "errores": errores,
             })
 
     return citas_encontradas
 
 
+# ---------------------------------------------------------------------------
+# Procesamiento de citas del documento completo
+# ---------------------------------------------------------------------------
 def procesar_citas(datos_extraidos):
     todas_citas = []
 
@@ -243,9 +343,10 @@ def procesar_citas(datos_extraidos):
 
         texto = parrafo.get("texto", "").strip() if isinstance(parrafo, dict) else str(parrafo).strip()
 
-        # Detener la búsqueda sólo en el encabezado exacto de referencias (no en oraciones ni en el índice)
+        # Detener la búsqueda sólo en el encabezado exacto de referencias
         if re.match(
-            r'^(VI\.|6\.|V\.|VII\.|VIII\.)?\s*(REFERENCIAS|REFERENCIAS BIBLIOGRÁFICAS|BIBLIOGRAFÍA|REFERENCES)\s*$',
+            r'^(VI\.|6\.|V\.|VII\.|VIII\.)?'
+            r'\s*(REFERENCIAS|REFERENCIAS BIBLIOGRÁFICAS|BIBLIOGRAFÍA|REFERENCES)\s*$',
             texto, re.IGNORECASE
         ):
             break
